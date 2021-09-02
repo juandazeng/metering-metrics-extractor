@@ -105,7 +105,6 @@ public class MainResource {
 
                 for (CommonPrefix datePrefix : s3.listObjectsV2(dateListRequest).commonPrefixes()) {
                     String datePrefixKey = datePrefix.prefix();
-                    int row = 0;
 
                     // Output file (1 file = 1 date)
                     String outputFileName = categoryName + "-" + datePrefixKey.substring(datePrefixKey.length() - 11, datePrefixKey.length() - 1) + ".txt";
@@ -126,17 +125,17 @@ public class MainResource {
                                 try {
                                     // Save the ORC data to a local file
                                     String orcFileAbsolutePath = saveOrcDataToFile(s3o.key());
-                                    // debug(++row + ". " + s3o.key() + ":" + orcFileAbsolutePath);
             
-                                    // Convert the ORC file into CSV
+                                    // Convert the ORC file into CSV (tab-separated)
                                     orcToCsv(orcFileAbsolutePath, writer);
             
                                     Files.delete(new File(orcFileAbsolutePath).toPath());
                                 } catch (IOException ex) {
-                                    // ex.printStackTrace();
                                     throw new RuntimeException(ex);
                                 }
                             }
+
+                            // Next page/set of files
                             String nextContinuationToken = listResponse.nextContinuationToken();
                             if (nextContinuationToken != null) {
                                 metricsListRequest = metricsListRequest.toBuilder().continuationToken(nextContinuationToken).build();
@@ -165,9 +164,6 @@ public class MainResource {
             )) {
                 TypeDescription schema = reader.getSchema();
                 List<String> fieldNames = schema.getFieldNames();
-                for (String fieldName : fieldNames) {
-                    debug(fieldName);
-                }
                 
                 try (RecordReader records = reader.rows(reader.options())) {
                     VectorizedRowBatch batch = schema.createRowBatch();
@@ -189,6 +185,7 @@ public class MainResource {
                                     BytesColumnVector keys = (BytesColumnVector) mapColumnVector.keys;
                                     BytesColumnVector values = (BytesColumnVector) mapColumnVector.values;
 
+                                    // Extract data in the Map column type, into a HashMap
                                     Map<String, String> labelsMap = new HashMap<>();
                                     for(long i=mapColumnVector.offsets[row]; i < mapColumnVector.offsets[row] + mapColumnVector.lengths[row]; ++i) {
                                         StringBuilder keySb = new StringBuilder();
@@ -201,13 +198,14 @@ public class MainResource {
                                     sb.append(labelsMap.get("namespace") + "\t");
                                     sb.append(labelsMap.get("pod") + "\t");
                                     sb.append(labelsMap.get("node"));
-                                    
+
                                 } else if (columnVector instanceof BytesColumnVector) {
                                     sb.append(((BytesColumnVector) columnVector).toString(row));
 
                                 } else {
                                     throw new IOException("Unknown column type:" + columnVector.toString());
                                 }
+
                                 if (col+1 < fieldNames.size()) {
                                     sb.append("\t");
                                 }
