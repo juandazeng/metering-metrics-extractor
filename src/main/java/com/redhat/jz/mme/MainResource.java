@@ -10,7 +10,9 @@ import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -39,6 +41,12 @@ import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
+// IMPORTANT: Configuration:
+// 1. Please set these 2 environment variables to their proper values:
+//    AWS_ACCESS_KEY_ID
+//    AWS_SECRET_ACCESS_KEY
+// 2. In the application.properties, set bucket.name, quarkus.s3.aws.region, quarkus.s3.aws.credentials.type=default, and working.directory (where the target files will be stored)
+
 @QuarkusMain
 public class MainResource {
     public static void main(String ... args) {
@@ -49,7 +57,7 @@ public class MainResource {
     public static class MmeApp implements QuarkusApplication {
         private static final Logger LOG = Logger.getLogger(MmeApp.class.getName());
         private static final String CATEGORY_PREFIX = "hive/metering.db/datasource_operator_metering_pod_";
-        private static final String HEADER = "amount\tdate\ttime\ttimeprecision\tlabels";
+        private static final String HEADER = "amount\tdate\ttime\ttimeprecision\tnamespace\tpod\tnode";
 
         @Inject
         S3Client s3;
@@ -177,10 +185,23 @@ public class MainResource {
                                     sb.append(sdf.format(new Date(time)));
 
                                 } else if (columnVector instanceof MapColumnVector) {
-                                    StringBuilder mapSb = new StringBuilder();
-                                    ((MapColumnVector) columnVector).stringifyValue(mapSb, row);
-                                    sb.append(mapSb.toString());
+                                    MapColumnVector mapColumnVector = (MapColumnVector) columnVector;
+                                    BytesColumnVector keys = (BytesColumnVector) mapColumnVector.keys;
+                                    BytesColumnVector values = (BytesColumnVector) mapColumnVector.values;
 
+                                    Map<String, String> labelsMap = new HashMap<>();
+                                    for(long i=mapColumnVector.offsets[row]; i < mapColumnVector.offsets[row] + mapColumnVector.lengths[row]; ++i) {
+                                        StringBuilder keySb = new StringBuilder();
+                                        StringBuilder valueSb = new StringBuilder();
+                                        keys.stringifyValue(keySb, (int) i);
+                                        values.stringifyValue(valueSb, (int) i);
+                                        labelsMap.put(keySb.toString().replaceAll("\"", ""), valueSb.toString().replaceAll("\"", ""));
+                                    }
+
+                                    sb.append(labelsMap.get("namespace") + "\t");
+                                    sb.append(labelsMap.get("pod") + "\t");
+                                    sb.append(labelsMap.get("node"));
+                                    
                                 } else if (columnVector instanceof BytesColumnVector) {
                                     sb.append(((BytesColumnVector) columnVector).toString(row));
 
