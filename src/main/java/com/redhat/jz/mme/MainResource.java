@@ -9,10 +9,16 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.text.SimpleDateFormat;
+import java.util.Calendar;
 import java.util.Date;
+import java.util.GregorianCalendar;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TimeZone;
+import java.util.TreeMap;
+import java.util.Map.Entry;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -68,6 +74,15 @@ public class MainResource {
         @ConfigProperty(name = "working.directory")
         String workingDirectory;
     
+        @ConfigProperty(name = "starting.yyyy")
+        String startingyyyy;
+    
+        @ConfigProperty(name = "starting.MM")
+        String startingMM;
+    
+        @ConfigProperty(name = "target.timezone")
+        String targetTimeZone;
+    
         @Override
         public int run(String... args) throws Exception {
             String dir = workingDirectory;
@@ -76,13 +91,35 @@ public class MainResource {
             }
             workingDirectory = Paths.get(dir).toAbsolutePath().normalize().toString();
             debug(workingDirectory);
+            Calendar startingDate = new GregorianCalendar(TimeZone.getTimeZone(targetTimeZone));
+            startingDate.set(Integer.parseInt(startingyyyy), Integer.parseInt(startingMM)-1, 1, 0, 0, 0);
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z");
+            //startingDate.add(Calendar.HOUR_OF_DAY, -1);
+            debug(startingDate.get(Calendar.YEAR) + "-" + (startingDate.get(Calendar.MONTH)+1) + "-" + startingDate.get(Calendar.DATE) + "-" + startingDate.get(Calendar.HOUR_OF_DAY) + ":" + startingDate.getTimeZone().getDisplayName());
+            startingDate.setTimeZone(TimeZone.getTimeZone("UTC"));
+            //debug(sdf.format(startingDate.getTimeZone()));
+            debug(startingDate.get(Calendar.YEAR) + "-" + (startingDate.get(Calendar.MONTH)+1) + "-" + startingDate.get(Calendar.DATE) + "-" + startingDate.get(Calendar.HOUR_OF_DAY) + ":" + startingDate.getTimeZone().getDisplayName());
+            
             downloadFromS3();
+
             Quarkus.waitForExit();
             return 0;
         }
 
 
         public void downloadFromS3() {
+            // Calculate the target starting date yyyy-MM-01 (GMT+8)
+            Calendar startingDate = new GregorianCalendar(TimeZone.getTimeZone(targetTimeZone));
+            startingDate.set(Integer.parseInt(startingyyyy), Integer.parseInt(startingMM)-1, 1, 0, 0, 0);
+            debug(startingDate.get(Calendar.YEAR) + "-" + (startingDate.get(Calendar.MONTH)+1) + "-" + startingDate.get(Calendar.DATE) + "-" + startingDate.get(Calendar.HOUR_OF_DAY) + ":" + startingDate.getTimeZone().getDisplayName());
+
+            // Since the data is stored in UTC, we need to convert it to UTC timezone
+            startingDate.setTimeZone(TimeZone.getTimeZone("UTC"));
+            int startingYear = startingDate.get(Calendar.YEAR);
+            int startingMonth = (startingDate.get(Calendar.MONTH)+1);
+            int startingDay = startingDate.get(Calendar.DATE);
+            debug(startingDate.get(Calendar.YEAR) + "-" + (startingDate.get(Calendar.MONTH)+1) + "-" + startingDate.get(Calendar.DATE) + "-" + startingDate.get(Calendar.HOUR_OF_DAY) + ":" + startingDate.getTimeZone().getDisplayName());
+
             // Get the folders for pod utilisation. The result should look similar to this:
             // hive/metering.db/datasource_operator_metering_pod_limit_cpu_cores/
             // hive/metering.db/datasource_operator_metering_pod_limit_memory_bytes/
@@ -97,6 +134,15 @@ public class MainResource {
                 String categoryName = categoryPrefixKey.substring(CATEGORY_PREFIX.length(), categoryPrefixKey.length() - 2);
                 debug("Processing category:" + categoryPrefixKey + "\n---------------------\n");
 
+                // This will store aggregated metrics data like this:
+                // usage_cpu_cores - Namespace A:
+                // -------------------------------
+                // 2021-05-01 78.56598
+                // 2021-05-02 53.00000
+                // 2021-05-03 82.05500
+                // ....
+                Map<String, Map<String, Double>> metricsByNamespace = new TreeMap<>();
+
                 // Get the date folders in this folder. The result should look similar to this:
                 // hive/metering.db/datasource_operator_metering_pod_limit_cpu_cores/dt=2021-06-23/
                 // hive/metering.db/datasource_operator_metering_pod_limit_cpu_cores/dt=2021-06-24/
@@ -106,14 +152,15 @@ public class MainResource {
                 for (CommonPrefix datePrefix : s3.listObjectsV2(dateListRequest).commonPrefixes()) {
                     String datePrefixKey = datePrefix.prefix();
 
-                    // Output file (1 file = 1 date)
-                    String outputFileName = categoryName + "-" + datePrefixKey.substring(datePrefixKey.length() - 11, datePrefixKey.length() - 1) + ".txt";
-                    debug("Processing file:" + outputFileName + "\n");
-                    try (BufferedWriter writer = new BufferedWriter(new FileWriter(new File(workingDirectory, outputFileName)))) {
-                        // Write the heading
-                        writer.write(HEADER);
-                        writer.newLine();
-
+                    // Only process data from startingDate onwards
+                    int sourceYear = Integer.valueOf(datePrefixKey.substring(datePrefixKey.length() - 11, datePrefixKey.length() - 7));
+                    int sourceMonth = Integer.valueOf(datePrefixKey.substring(datePrefixKey.length() - 6, datePrefixKey.length() - 4));
+                    int sourceDay = Integer.valueOf(datePrefixKey.substring(datePrefixKey.length() - 3, datePrefixKey.length() - 1));
+                    if ((sourceYear*365 + sourceMonth*30 + sourceDay) >=
+                        (startingYear*365 + startingMonth*30 + startingDay)
+                    ) {
+                        debug("Processing date:" + categoryName + "-" + datePrefixKey.substring(datePrefixKey.length() - 11, datePrefixKey.length() - 1));
+                        
                         // Get metrics files in this folder
                         ListObjectsV2Request metricsListRequest = ListObjectsV2Request.builder().prefix(datePrefixKey).bucket(bucketName).build();
                         
@@ -126,8 +173,8 @@ public class MainResource {
                                     // Save the ORC data to a local file
                                     String orcFileAbsolutePath = saveOrcDataToFile(s3o.key());
             
-                                    // Convert the ORC file into CSV (tab-separated)
-                                    orcToCsv(orcFileAbsolutePath, writer);
+                                    // Collect metrics data from the ORC file
+                                    orcToMetricsMap(orcFileAbsolutePath, metricsByNamespace, startingYear, startingMonth);
             
                                     Files.delete(new File(orcFileAbsolutePath).toPath());
                                 } catch (IOException ex) {
@@ -144,10 +191,18 @@ public class MainResource {
                             }
                 
                         } while (!done);
+                    }
+                }
 
-                        // Probably not necessary since it's in try-with above
-                        writer.flush();
-                        writer.close();
+
+                // Save the metrics data to file
+                for (Entry<String, Map<String, Double>> entrySet : metricsByNamespace.entrySet()) {
+                    String outputFileName = categoryName + "_" + entrySet.getKey() + ".txt";
+                    try (BufferedWriter writer = new BufferedWriter(new FileWriter(new File(workingDirectory, outputFileName)))) {
+                        for (Entry<String, Double> metricsByDate : entrySet.getValue().entrySet()) {
+                            writer.write(metricsByDate.getKey() + "\t" + metricsByDate.getValue());
+                            writer.newLine();
+                        }
                     } catch (IOException ex) {
                         throw new RuntimeException(ex);
                     }
@@ -155,8 +210,7 @@ public class MainResource {
             }
         }
     
-        private void orcToCsv(String orcFileAbsolutePath, BufferedWriter writer) throws IOException {
-            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'\t'HH:mm:ss.SSSZ");
+        private void orcToMetricsMap(String orcFileAbsolutePath, Map<String, Map<String, Double>> metricsByNamespace, int startingYear, int startingMonth) throws IOException {
             
             try (Reader reader = OrcFile.createReader(
                 new org.apache.hadoop.fs.Path(orcFileAbsolutePath),
@@ -170,52 +224,80 @@ public class MainResource {
     
                     while (records.nextBatch(batch)) {
                         for(int row=0; row < batch.size; ++row) {
-                            StringBuilder sb = new StringBuilder();
+                            Double utilisation = null;
+                            String namespace = null;
+                            Calendar timestamp = null;
+
                             for (int col=0; col < fieldNames.size(); col++) {
                                 ColumnVector columnVector = batch.cols[col];
                                 if (columnVector instanceof DoubleColumnVector) {
-                                    sb.append(((DoubleColumnVector) columnVector).vector[row]);
-
-                                } else if (columnVector instanceof TimestampColumnVector) {
-                                    long time = ((TimestampColumnVector) columnVector).time[row];
-                                    sb.append(sdf.format(new Date(time)));
-
-                                } else if (columnVector instanceof MapColumnVector) {
-                                    MapColumnVector mapColumnVector = (MapColumnVector) columnVector;
-                                    BytesColumnVector keys = (BytesColumnVector) mapColumnVector.keys;
-                                    BytesColumnVector values = (BytesColumnVector) mapColumnVector.values;
-
-                                    // Extract data in the Map column type, into a HashMap
-                                    Map<String, String> labelsMap = new HashMap<>();
-                                    for(long i=mapColumnVector.offsets[row]; i < mapColumnVector.offsets[row] + mapColumnVector.lengths[row]; ++i) {
-                                        StringBuilder keySb = new StringBuilder();
-                                        StringBuilder valueSb = new StringBuilder();
-                                        keys.stringifyValue(keySb, (int) i);
-                                        values.stringifyValue(valueSb, (int) i);
-                                        labelsMap.put(keySb.toString().replaceAll("\"", ""), valueSb.toString().replaceAll("\"", ""));
+                                    // Only process the first double field, which is the utilisation field
+                                    if (utilisation == null) {
+                                        utilisation = ((DoubleColumnVector) columnVector).vector[row];
                                     }
 
-                                    sb.append(labelsMap.get("namespace") + "\t");
-                                    sb.append(labelsMap.get("pod") + "\t");
-                                    sb.append(labelsMap.get("node"));
+                                } else if (columnVector instanceof TimestampColumnVector) {
+                                    // Only process the first timestamp, which is the timestamp we're interested in
+                                    if (timestamp == null) {
+                                        // This timestamp is in UTC
+                                        long time = ((TimestampColumnVector) columnVector).time[row];
+                                        Calendar sourceTimestamp = new GregorianCalendar(TimeZone.getTimeZone("UTC"));
+                                        sourceTimestamp.setTimeInMillis(time);
+                                        debug(sourceTimestamp.get(Calendar.YEAR) + "-" + (sourceTimestamp.get(Calendar.MONTH)+1) + "-" + sourceTimestamp.get(Calendar.DATE) + "-" + sourceTimestamp.get(Calendar.HOUR_OF_DAY) + ":" + sourceTimestamp.getTimeZone().getDisplayName());
+
+                                        // Convert it to our target timezone
+                                        sourceTimestamp.setTimeZone(TimeZone.getTimeZone(targetTimeZone));
+                                        timestamp = sourceTimestamp;
+                                        debug(timestamp.get(Calendar.YEAR) + "-" + (timestamp.get(Calendar.MONTH)+1) + "-" + timestamp.get(Calendar.DATE) + "-" + timestamp.get(Calendar.HOUR_OF_DAY) + ":" + timestamp.getTimeZone().getDisplayName());
+                                    }
+
+                                } else if (columnVector instanceof MapColumnVector) {
+                                    if (namespace == null) {
+                                        MapColumnVector mapColumnVector = (MapColumnVector) columnVector;
+                                        BytesColumnVector keys = (BytesColumnVector) mapColumnVector.keys;
+                                        BytesColumnVector values = (BytesColumnVector) mapColumnVector.values;
+
+                                        // Extract data in the Map column type, into a HashMap
+                                        Map<String, String> labelsMap = new HashMap<>();
+                                        for(long i=mapColumnVector.offsets[row]; i < mapColumnVector.offsets[row] + mapColumnVector.lengths[row]; ++i) {
+                                            StringBuilder keySb = new StringBuilder();
+                                            StringBuilder valueSb = new StringBuilder();
+                                            keys.stringifyValue(keySb, (int) i);
+                                            values.stringifyValue(valueSb, (int) i);
+                                            labelsMap.put(keySb.toString().replaceAll("\"", ""), valueSb.toString().replaceAll("\"", ""));
+                                        }
+
+                                        namespace = labelsMap.get("namespace");
+                                    }
 
                                 } else if (columnVector instanceof BytesColumnVector) {
-                                    sb.append(((BytesColumnVector) columnVector).toString(row));
+                                    // We will ignore this string data for now
 
                                 } else {
-                                    throw new IOException("Unknown column type:" + columnVector.toString());
-                                }
-
-                                if (col+1 < fieldNames.size()) {
-                                    sb.append("\t");
+                                    // TODO: Handle unknown column type here
+                                    // throw new IOException("Unknown column type:" + columnVector.toString());
                                 }
                             }
-                            writer.write(sb.toString());
-                            writer.newLine();
 
-                            // For debugging, print just the last line
-                            if (row+1 == batch.size) {
-                                debug("Last line:" + sb.toString());
+                            // Only store the data if it's within our desired date range
+                            int currentYear = timestamp.get(Calendar.YEAR);
+                            int currentMonth = (timestamp.get(Calendar.MONTH)+1);
+
+                            if ((currentYear*12 + currentMonth) >=
+                                (startingYear*12 + startingMonth)) {
+                                // Store the data in the Map
+                                Map<String, Double> metricsByDate = metricsByNamespace.get(namespace);
+                                if (metricsByDate == null) {
+                                    metricsByDate = new TreeMap<>();
+                                    metricsByNamespace.put(namespace, metricsByDate);
+                                }
+                                String yyyyMMdd = timestamp.get(Calendar.YEAR) + "-" + (timestamp.get(Calendar.MONTH)+1) + "-" + timestamp.get(Calendar.DATE);
+                                Double metrics = metricsByDate.get(yyyyMMdd);
+                                if (metrics == null) {
+                                    metricsByDate.put(yyyyMMdd, utilisation);
+                                } else {
+                                    metricsByDate.put(yyyyMMdd, metrics + utilisation);
+                                }
                             }
                         }
                     }
