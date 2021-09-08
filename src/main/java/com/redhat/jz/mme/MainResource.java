@@ -94,7 +94,6 @@ public class MainResource {
             Calendar startingDate = new GregorianCalendar(TimeZone.getTimeZone(targetTimeZone));
             startingDate.set(Integer.parseInt(startingyyyy), Integer.parseInt(startingMM)-1, 1, 0, 0, 0);
             SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z");
-            //startingDate.add(Calendar.HOUR_OF_DAY, -1);
             debug(startingDate.get(Calendar.YEAR) + "-" + (startingDate.get(Calendar.MONTH)+1) + "-" + startingDate.get(Calendar.DATE) + "-" + startingDate.get(Calendar.HOUR_OF_DAY) + ":" + startingDate.getTimeZone().getDisplayName());
             startingDate.setTimeZone(TimeZone.getTimeZone("UTC"));
             //debug(sdf.format(startingDate.getTimeZone()));
@@ -110,15 +109,19 @@ public class MainResource {
         public void downloadFromS3() {
             // Calculate the target starting date yyyy-MM-01 (GMT+8)
             Calendar startingDate = new GregorianCalendar(TimeZone.getTimeZone(targetTimeZone));
-            startingDate.set(Integer.parseInt(startingyyyy), Integer.parseInt(startingMM)-1, 1, 0, 0, 0);
-            debug(startingDate.get(Calendar.YEAR) + "-" + (startingDate.get(Calendar.MONTH)+1) + "-" + startingDate.get(Calendar.DATE) + "-" + startingDate.get(Calendar.HOUR_OF_DAY) + ":" + startingDate.getTimeZone().getDisplayName());
+            int targetStartingYear = Integer.parseInt(startingyyyy);
+            int targetStartingMonth = Integer.parseInt(startingMM);
+            startingDate.set(targetStartingYear, targetStartingMonth-1, 1, 0, 0, 0);
+            // Ensure conversion takes effect by issuing a get before setting the new timezone
+            startingDate.get(Calendar.YEAR);
+            // debug(startingDate.get(Calendar.YEAR) + "-" + (startingDate.get(Calendar.MONTH)+1) + "-" + startingDate.get(Calendar.DATE) + "-" + startingDate.get(Calendar.HOUR_OF_DAY) + ":" + startingDate.getTimeZone().getDisplayName());
 
             // Since the data is stored in UTC, we need to convert it to UTC timezone
             startingDate.setTimeZone(TimeZone.getTimeZone("UTC"));
             int startingYear = startingDate.get(Calendar.YEAR);
             int startingMonth = (startingDate.get(Calendar.MONTH)+1);
             int startingDay = startingDate.get(Calendar.DATE);
-            debug(startingDate.get(Calendar.YEAR) + "-" + (startingDate.get(Calendar.MONTH)+1) + "-" + startingDate.get(Calendar.DATE) + "-" + startingDate.get(Calendar.HOUR_OF_DAY) + ":" + startingDate.getTimeZone().getDisplayName());
+            // debug(startingDate.get(Calendar.YEAR) + "-" + (startingDate.get(Calendar.MONTH)+1) + "-" + startingDate.get(Calendar.DATE) + "-" + startingDate.get(Calendar.HOUR_OF_DAY) + ":" + startingDate.getTimeZone().getDisplayName());
 
             // Get the folders for pod utilisation. The result should look similar to this:
             // hive/metering.db/datasource_operator_metering_pod_limit_cpu_cores/
@@ -159,7 +162,7 @@ public class MainResource {
                     if ((sourceYear*365 + sourceMonth*30 + sourceDay) >=
                         (startingYear*365 + startingMonth*30 + startingDay)
                     ) {
-                        debug("Processing date:" + categoryName + "-" + datePrefixKey.substring(datePrefixKey.length() - 11, datePrefixKey.length() - 1));
+                        // debug("Processing date:" + categoryName + "-" + datePrefixKey.substring(datePrefixKey.length() - 11, datePrefixKey.length() - 1));
                         
                         // Get metrics files in this folder
                         ListObjectsV2Request metricsListRequest = ListObjectsV2Request.builder().prefix(datePrefixKey).bucket(bucketName).build();
@@ -174,7 +177,7 @@ public class MainResource {
                                     String orcFileAbsolutePath = saveOrcDataToFile(s3o.key());
             
                                     // Collect metrics data from the ORC file
-                                    orcToMetricsMap(orcFileAbsolutePath, metricsByNamespace, startingYear, startingMonth);
+                                    orcToMetricsMap(orcFileAbsolutePath, metricsByNamespace, targetStartingYear, targetStartingMonth);
             
                                     Files.delete(new File(orcFileAbsolutePath).toPath());
                                 } catch (IOException ex) {
@@ -208,9 +211,11 @@ public class MainResource {
                     }
                 }
             }
+
+            debug("Done.");
         }
     
-        private void orcToMetricsMap(String orcFileAbsolutePath, Map<String, Map<String, Double>> metricsByNamespace, int startingYear, int startingMonth) throws IOException {
+        private void orcToMetricsMap(String orcFileAbsolutePath, Map<String, Map<String, Double>> metricsByNamespace, int targetStartingYear, int targetStartingMonth) throws IOException {
             
             try (Reader reader = OrcFile.createReader(
                 new org.apache.hadoop.fs.Path(orcFileAbsolutePath),
@@ -243,12 +248,18 @@ public class MainResource {
                                         long time = ((TimestampColumnVector) columnVector).time[row];
                                         Calendar sourceTimestamp = new GregorianCalendar(TimeZone.getTimeZone("UTC"));
                                         sourceTimestamp.setTimeInMillis(time);
-                                        debug(sourceTimestamp.get(Calendar.YEAR) + "-" + (sourceTimestamp.get(Calendar.MONTH)+1) + "-" + sourceTimestamp.get(Calendar.DATE) + "-" + sourceTimestamp.get(Calendar.HOUR_OF_DAY) + ":" + sourceTimestamp.getTimeZone().getDisplayName());
+                                        // We need to perform a get prior to changing the timezone,
+                                        // otherwise the setTimeZone call below would initialise
+                                        // sourceTimestamp with the targetTimeZone instead of
+                                        // converting it from UTC to targetTimeZone.
+                                        // To convert timezone, we need to perform a get
+                                        sourceTimestamp.get(Calendar.YEAR);
+                                        // debug(sourceTimestamp.get(Calendar.YEAR) + "-" + (sourceTimestamp.get(Calendar.MONTH)+1) + "-" + sourceTimestamp.get(Calendar.DATE) + "-" + sourceTimestamp.get(Calendar.HOUR_OF_DAY) + ":" + sourceTimestamp.getTimeZone().getDisplayName());
 
                                         // Convert it to our target timezone
                                         sourceTimestamp.setTimeZone(TimeZone.getTimeZone(targetTimeZone));
                                         timestamp = sourceTimestamp;
-                                        debug(timestamp.get(Calendar.YEAR) + "-" + (timestamp.get(Calendar.MONTH)+1) + "-" + timestamp.get(Calendar.DATE) + "-" + timestamp.get(Calendar.HOUR_OF_DAY) + ":" + timestamp.getTimeZone().getDisplayName());
+                                        // debug(timestamp.get(Calendar.YEAR) + "-" + (timestamp.get(Calendar.MONTH)+1) + "-" + timestamp.get(Calendar.DATE) + "-" + timestamp.get(Calendar.HOUR_OF_DAY) + ":" + timestamp.getTimeZone().getDisplayName());
                                     }
 
                                 } else if (columnVector instanceof MapColumnVector) {
@@ -284,7 +295,7 @@ public class MainResource {
                             int currentMonth = (timestamp.get(Calendar.MONTH)+1);
 
                             if ((currentYear*12 + currentMonth) >=
-                                (startingYear*12 + startingMonth)) {
+                                (targetStartingYear*12 + targetStartingMonth)) {
                                 // Store the data in the Map
                                 Map<String, Double> metricsByDate = metricsByNamespace.get(namespace);
                                 if (metricsByDate == null) {
@@ -295,6 +306,7 @@ public class MainResource {
                                 Double metrics = metricsByDate.get(yyyyMMdd);
                                 if (metrics == null) {
                                     metricsByDate.put(yyyyMMdd, utilisation);
+                                    debug(namespace + "." + yyyyMMdd + " - (namespaces, days):" + metricsByNamespace.size() + "." + metricsByDate.size());
                                 } else {
                                     metricsByDate.put(yyyyMMdd, metrics + utilisation);
                                 }
