@@ -8,15 +8,16 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
-import java.text.SimpleDateFormat;
-import java.util.Calendar;
-import java.util.Date;
-import java.util.GregorianCalendar;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TimeZone;
 import java.util.TreeMap;
 import java.util.Map.Entry;
 import java.util.logging.Level;
@@ -63,7 +64,7 @@ public class MainResource {
     public static class MmeApp implements QuarkusApplication {
         private static final Logger LOG = Logger.getLogger(MmeApp.class.getName());
         private static final String CATEGORY_PREFIX = "hive/metering.db/datasource_operator_metering_pod_";
-        private static final String HEADER = "amount\tdate\ttime\ttimeprecision\tnamespace\tpod\tnode";
+        // private static final String HEADER = "amount\tdate\ttime\ttimeprecision\tnamespace\tpod\tnode";
 
         @Inject
         S3Client s3;
@@ -83,6 +84,9 @@ public class MainResource {
         @ConfigProperty(name = "target.timezone")
         String targetTimeZone;
     
+        @ConfigProperty(name = "categories")
+        String categories;
+    
         @Override
         public int run(String... args) throws Exception {
             String dir = workingDirectory;
@@ -90,38 +94,48 @@ public class MainResource {
                 dir = ".";
             }
             workingDirectory = Paths.get(dir).toAbsolutePath().normalize().toString();
-            debug(workingDirectory);
-            Calendar startingDate = new GregorianCalendar(TimeZone.getTimeZone(targetTimeZone));
-            startingDate.set(Integer.parseInt(startingyyyy), Integer.parseInt(startingMM)-1, 1, 0, 0, 0);
-            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z");
-            debug(startingDate.get(Calendar.YEAR) + "-" + (startingDate.get(Calendar.MONTH)+1) + "-" + startingDate.get(Calendar.DATE) + "-" + startingDate.get(Calendar.HOUR_OF_DAY) + ":" + startingDate.getTimeZone().getDisplayName());
-            startingDate.setTimeZone(TimeZone.getTimeZone("UTC"));
-            //debug(sdf.format(startingDate.getTimeZone()));
-            debug(startingDate.get(Calendar.YEAR) + "-" + (startingDate.get(Calendar.MONTH)+1) + "-" + startingDate.get(Calendar.DATE) + "-" + startingDate.get(Calendar.HOUR_OF_DAY) + ":" + startingDate.getTimeZone().getDisplayName());
             
+            LocalDateTime dateTimeWithoutTimeZone = LocalDateTime.of(Integer.parseInt(startingyyyy), Integer.parseInt(startingMM), 1, 0, 0, 0);
+            ZonedDateTime targetDateTimeWithTimeZone = dateTimeWithoutTimeZone.atZone(ZoneId.of(targetTimeZone));
+            ZonedDateTime sourceTimeWithTimeZone = targetDateTimeWithTimeZone.withZoneSameInstant(ZoneId.of("UTC"));
+            debug(dateTimeWithoutTimeZone.toString());
+            debug(targetDateTimeWithTimeZone.toString());
+            debug(sourceTimeWithTimeZone.toString());
+            debug(sourceTimeWithTimeZone.getYear() + "-" + sourceTimeWithTimeZone.getMonthValue() + "-" + sourceTimeWithTimeZone.getDayOfMonth() + " " + sourceTimeWithTimeZone.getHour() + ":" + sourceTimeWithTimeZone.getMinute());
+
+            String[] categoriesArray = categories.split(",");
+            Set<String> categoriesSet = new HashSet<>();
+            for (String category : categoriesArray) {
+                categoriesSet.add(category.strip());
+            }
+            debug(categoriesSet.contains("usage_cpu") ? "yes" : "no");
+
             downloadFromS3();
 
             Quarkus.waitForExit();
             return 0;
         }
 
-
         public void downloadFromS3() {
             // Calculate the target starting date yyyy-MM-01 (GMT+8)
-            Calendar startingDate = new GregorianCalendar(TimeZone.getTimeZone(targetTimeZone));
             int targetStartingYear = Integer.parseInt(startingyyyy);
             int targetStartingMonth = Integer.parseInt(startingMM);
-            startingDate.set(targetStartingYear, targetStartingMonth-1, 1, 0, 0, 0);
-            // Ensure conversion takes effect by issuing a get before setting the new timezone
-            startingDate.get(Calendar.YEAR);
-            // debug(startingDate.get(Calendar.YEAR) + "-" + (startingDate.get(Calendar.MONTH)+1) + "-" + startingDate.get(Calendar.DATE) + "-" + startingDate.get(Calendar.HOUR_OF_DAY) + ":" + startingDate.getTimeZone().getDisplayName());
-
+            LocalDateTime dateTimeWithoutTimeZone = LocalDateTime.of(targetStartingYear, targetStartingMonth, 1, 0, 0, 0);
+            ZonedDateTime targetDateTimeWithTimeZone = dateTimeWithoutTimeZone.atZone(ZoneId.of(targetTimeZone));
             // Since the data is stored in UTC, we need to convert it to UTC timezone
-            startingDate.setTimeZone(TimeZone.getTimeZone("UTC"));
-            int startingYear = startingDate.get(Calendar.YEAR);
-            int startingMonth = (startingDate.get(Calendar.MONTH)+1);
-            int startingDay = startingDate.get(Calendar.DATE);
-            // debug(startingDate.get(Calendar.YEAR) + "-" + (startingDate.get(Calendar.MONTH)+1) + "-" + startingDate.get(Calendar.DATE) + "-" + startingDate.get(Calendar.HOUR_OF_DAY) + ":" + startingDate.getTimeZone().getDisplayName());
+            ZonedDateTime sourceTimeWithTimeZone = targetDateTimeWithTimeZone.withZoneSameInstant(ZoneId.of("UTC"));
+
+            int startingYear = sourceTimeWithTimeZone.getYear();
+            int startingMonth = sourceTimeWithTimeZone.getMonthValue();
+            int startingDay = sourceTimeWithTimeZone.getDayOfMonth();
+
+            // Get a list of categories we are interested in
+            String[] categoriesArray = categories.split(",");
+            Set<String> categoriesSet = new HashSet<>();
+            for (String category : categoriesArray) {
+                categoriesSet.add(category.strip());
+            }
+            debug(categoriesSet.contains("usage_cpu") ? "yes" : "no");
 
             // Get the folders for pod utilisation. The result should look similar to this:
             // hive/metering.db/datasource_operator_metering_pod_limit_cpu_cores/
@@ -134,83 +148,87 @@ public class MainResource {
             ListObjectsV2Request listRequest = ListObjectsV2Request.builder().prefix(CATEGORY_PREFIX).delimiter("/").bucket(bucketName).build();
             for (CommonPrefix categoryPrefix : s3.listObjectsV2(listRequest).commonPrefixes()) {
                 String categoryPrefixKey = categoryPrefix.prefix();
-                String categoryName = categoryPrefixKey.substring(CATEGORY_PREFIX.length(), categoryPrefixKey.length() - 2);
-                debug("Processing category:" + categoryPrefixKey + "\n---------------------\n");
+                String categoryName = categoryPrefixKey.substring(CATEGORY_PREFIX.length(), categoryPrefixKey.length() - 1);
+                if (categoriesSet.contains(categoryName)) {
+                    debug("Processing category:" + categoryPrefixKey + "\n---------------------\n");
 
-                // This will store aggregated metrics data like this:
-                // usage_cpu_cores - Namespace A:
-                // -------------------------------
-                // 2021-05-01 78.56598
-                // 2021-05-02 53.00000
-                // 2021-05-03 82.05500
-                // ....
-                Map<String, Map<String, Double>> metricsByNamespace = new TreeMap<>();
+                    // This will store aggregated metrics data like this:
+                    // usage_cpu_cores - Namespace A:
+                    // -------------------------------
+                    // 2021-05-01 78.56598
+                    // 2021-05-02 53.00000
+                    // 2021-05-03 82.05500
+                    // ....
+                    Map<String, Map<String, Double>> metricsByNamespace = new TreeMap<>();
+                    debug("metricsByNamespace:" + metricsByNamespace.size());
 
-                // Get the date folders in this folder. The result should look similar to this:
-                // hive/metering.db/datasource_operator_metering_pod_limit_cpu_cores/dt=2021-06-23/
-                // hive/metering.db/datasource_operator_metering_pod_limit_cpu_cores/dt=2021-06-24/
-                // hive/metering.db/datasource_operator_metering_pod_limit_cpu_cores/dt=2021-06-25/
-                ListObjectsV2Request dateListRequest = ListObjectsV2Request.builder().prefix(categoryPrefix.prefix() + "dt=").delimiter("/").bucket(bucketName).build();
+                    // Get the date folders in this folder. The result should look similar to this:
+                    // hive/metering.db/datasource_operator_metering_pod_limit_cpu_cores/dt=2021-06-23/
+                    // hive/metering.db/datasource_operator_metering_pod_limit_cpu_cores/dt=2021-06-24/
+                    // hive/metering.db/datasource_operator_metering_pod_limit_cpu_cores/dt=2021-06-25/
+                    ListObjectsV2Request dateListRequest = ListObjectsV2Request.builder().prefix(categoryPrefix.prefix() + "dt=").delimiter("/").bucket(bucketName).build();
 
-                for (CommonPrefix datePrefix : s3.listObjectsV2(dateListRequest).commonPrefixes()) {
-                    String datePrefixKey = datePrefix.prefix();
+                    for (CommonPrefix datePrefix : s3.listObjectsV2(dateListRequest).commonPrefixes()) {
+                        String datePrefixKey = datePrefix.prefix();
 
-                    // Only process data from startingDate onwards
-                    int sourceYear = Integer.valueOf(datePrefixKey.substring(datePrefixKey.length() - 11, datePrefixKey.length() - 7));
-                    int sourceMonth = Integer.valueOf(datePrefixKey.substring(datePrefixKey.length() - 6, datePrefixKey.length() - 4));
-                    int sourceDay = Integer.valueOf(datePrefixKey.substring(datePrefixKey.length() - 3, datePrefixKey.length() - 1));
-                    if ((sourceYear*365 + sourceMonth*30 + sourceDay) >=
-                        (startingYear*365 + startingMonth*30 + startingDay)
-                    ) {
-                        // debug("Processing date:" + categoryName + "-" + datePrefixKey.substring(datePrefixKey.length() - 11, datePrefixKey.length() - 1));
-                        
-                        // Get metrics files in this folder
-                        ListObjectsV2Request metricsListRequest = ListObjectsV2Request.builder().prefix(datePrefixKey).bucket(bucketName).build();
-                        
-                        boolean done = false;
-                        do {
+                        // Only process data from startingDate onwards
+                        int sourceYear = Integer.valueOf(datePrefixKey.substring(datePrefixKey.length() - 11, datePrefixKey.length() - 7));
+                        int sourceMonth = Integer.valueOf(datePrefixKey.substring(datePrefixKey.length() - 6, datePrefixKey.length() - 4));
+                        int sourceDay = Integer.valueOf(datePrefixKey.substring(datePrefixKey.length() - 3, datePrefixKey.length() - 1));
+                        if ((sourceYear*365 + sourceMonth*30 + sourceDay) >=
+                            (startingYear*365 + startingMonth*30 + startingDay)
+                        ) {
+                            // debug("Processing date:" + categoryName + "-" + datePrefixKey.substring(datePrefixKey.length() - 11, datePrefixKey.length() - 1));
                             
-                            ListObjectsV2Response listResponse = s3.listObjectsV2(metricsListRequest);
-                            for (S3Object s3o : listResponse.contents()) {
-                                try {
-                                    // Save the ORC data to a local file
-                                    String orcFileAbsolutePath = saveOrcDataToFile(s3o.key());
-            
-                                    // Collect metrics data from the ORC file
-                                    orcToMetricsMap(orcFileAbsolutePath, metricsByNamespace, targetStartingYear, targetStartingMonth);
-            
-                                    Files.delete(new File(orcFileAbsolutePath).toPath());
-                                } catch (IOException ex) {
-                                    throw new RuntimeException(ex);
-                                }
-                            }
-
-                            // Next page/set of files
-                            String nextContinuationToken = listResponse.nextContinuationToken();
-                            if (nextContinuationToken != null) {
-                                metricsListRequest = metricsListRequest.toBuilder().continuationToken(nextContinuationToken).build();
-                            } else {
-                                done = true;
-                            }
+                            // Get metrics files in this folder
+                            ListObjectsV2Request metricsListRequest = ListObjectsV2Request.builder().prefix(datePrefixKey).bucket(bucketName).build();
+                            
+                            boolean done = false;
+                            do {
+                                
+                                ListObjectsV2Response listResponse = s3.listObjectsV2(metricsListRequest);
+                                for (S3Object s3o : listResponse.contents()) {
+                                    try {
+                                        // Save the ORC data to a local file
+                                        String orcFileAbsolutePath = saveOrcDataToFile(s3o.key());
                 
-                        } while (!done);
-                    }
-                }
+                                        // Collect metrics data from the ORC file
+                                        orcToMetricsMap(orcFileAbsolutePath, metricsByNamespace, targetStartingYear, targetStartingMonth);
+                
+                                        Files.delete(new File(orcFileAbsolutePath).toPath());
+                                    } catch (IOException ex) {
+                                        throw new RuntimeException(ex);
+                                    }
+                                }
 
-
-                // Save the metrics data to file
-                for (Entry<String, Map<String, Double>> entrySet : metricsByNamespace.entrySet()) {
-                    String outputFileName = categoryName + "_" + entrySet.getKey() + ".txt";
-                    try (BufferedWriter writer = new BufferedWriter(new FileWriter(new File(workingDirectory, outputFileName)))) {
-                        for (Entry<String, Double> metricsByDate : entrySet.getValue().entrySet()) {
-                            writer.write(metricsByDate.getKey() + "\t" + metricsByDate.getValue());
-                            writer.newLine();
+                                // Next page/set of files
+                                String nextContinuationToken = listResponse.nextContinuationToken();
+                                if (nextContinuationToken != null) {
+                                    metricsListRequest = metricsListRequest.toBuilder().continuationToken(nextContinuationToken).build();
+                                } else {
+                                    done = true;
+                                }
+                    
+                            } while (!done);
                         }
-                    } catch (IOException ex) {
-                        throw new RuntimeException(ex);
                     }
+
+                    // Save the metrics data to file
+                    for (Entry<String, Map<String, Double>> entrySet : metricsByNamespace.entrySet()) {
+                        String outputFileName = categoryName + "_" + entrySet.getKey() + ".txt";
+                        try (BufferedWriter writer = new BufferedWriter(new FileWriter(new File(workingDirectory, outputFileName)))) {
+                            for (Entry<String, Double> metricsByDate : entrySet.getValue().entrySet()) {
+                                writer.write(metricsByDate.getKey() + "\t" + metricsByDate.getValue());
+                                writer.newLine();
+                            }
+                        } catch (IOException ex) {
+                            throw new RuntimeException(ex);
+                        }
+                    }
+                } else {
+                    debug("Skipping category:" + categoryPrefixKey + "\n---------------------\n");
                 }
-            }
+            } // for categories
 
             debug("Done.");
         }
@@ -223,6 +241,7 @@ public class MainResource {
             )) {
                 TypeDescription schema = reader.getSchema();
                 List<String> fieldNames = schema.getFieldNames();
+                DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd");
                 
                 try (RecordReader records = reader.rows(reader.options())) {
                     VectorizedRowBatch batch = schema.createRowBatch();
@@ -231,7 +250,7 @@ public class MainResource {
                         for(int row=0; row < batch.size; ++row) {
                             Double utilisation = null;
                             String namespace = null;
-                            Calendar timestamp = null;
+                            ZonedDateTime targetTimestamp = null;
 
                             for (int col=0; col < fieldNames.size(); col++) {
                                 ColumnVector columnVector = batch.cols[col];
@@ -243,23 +262,14 @@ public class MainResource {
 
                                 } else if (columnVector instanceof TimestampColumnVector) {
                                     // Only process the first timestamp, which is the timestamp we're interested in
-                                    if (timestamp == null) {
+                                    if (targetTimestamp == null) {
                                         // This timestamp is in UTC
-                                        long time = ((TimestampColumnVector) columnVector).time[row];
-                                        Calendar sourceTimestamp = new GregorianCalendar(TimeZone.getTimeZone("UTC"));
-                                        sourceTimestamp.setTimeInMillis(time);
-                                        // We need to perform a get prior to changing the timezone,
-                                        // otherwise the setTimeZone call below would initialise
-                                        // sourceTimestamp with the targetTimeZone instead of
-                                        // converting it from UTC to targetTimeZone.
-                                        // To convert timezone, we need to perform a get
-                                        sourceTimestamp.get(Calendar.YEAR);
-                                        // debug(sourceTimestamp.get(Calendar.YEAR) + "-" + (sourceTimestamp.get(Calendar.MONTH)+1) + "-" + sourceTimestamp.get(Calendar.DATE) + "-" + sourceTimestamp.get(Calendar.HOUR_OF_DAY) + ":" + sourceTimestamp.getTimeZone().getDisplayName());
+                                        long epochMilli = ((TimestampColumnVector) columnVector).time[row];
+                                        Instant instant = Instant.ofEpochMilli(epochMilli);
+                                        ZonedDateTime sourceTimestamp = ZonedDateTime.ofInstant(instant, ZoneId.of("UTC"));
 
-                                        // Convert it to our target timezone
-                                        sourceTimestamp.setTimeZone(TimeZone.getTimeZone(targetTimeZone));
-                                        timestamp = sourceTimestamp;
-                                        // debug(timestamp.get(Calendar.YEAR) + "-" + (timestamp.get(Calendar.MONTH)+1) + "-" + timestamp.get(Calendar.DATE) + "-" + timestamp.get(Calendar.HOUR_OF_DAY) + ":" + timestamp.getTimeZone().getDisplayName());
+                                        // Convert it to targetTimeZone
+                                        targetTimestamp = sourceTimestamp.withZoneSameInstant(ZoneId.of(targetTimeZone));
                                     }
 
                                 } else if (columnVector instanceof MapColumnVector) {
@@ -291,8 +301,8 @@ public class MainResource {
                             }
 
                             // Only store the data if it's within our desired date range
-                            int currentYear = timestamp.get(Calendar.YEAR);
-                            int currentMonth = (timestamp.get(Calendar.MONTH)+1);
+                            int currentYear = targetTimestamp.getYear();
+                            int currentMonth = targetTimestamp.getMonthValue();
 
                             if ((currentYear*12 + currentMonth) >=
                                 (targetStartingYear*12 + targetStartingMonth)) {
@@ -302,7 +312,7 @@ public class MainResource {
                                     metricsByDate = new TreeMap<>();
                                     metricsByNamespace.put(namespace, metricsByDate);
                                 }
-                                String yyyyMMdd = timestamp.get(Calendar.YEAR) + "-" + (timestamp.get(Calendar.MONTH)+1) + "-" + timestamp.get(Calendar.DATE);
+                                String yyyyMMdd = dtf.format(targetTimestamp);
                                 Double metrics = metricsByDate.get(yyyyMMdd);
                                 if (metrics == null) {
                                     metricsByDate.put(yyyyMMdd, utilisation);
