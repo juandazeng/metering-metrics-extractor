@@ -57,7 +57,6 @@ import software.amazon.awssdk.services.s3.model.S3Object;
 @QuarkusMain
 public class MainResource {
     public static void main(String ... args) {
-        System.out.println("Running main method");
         Quarkus.run(MmeApp.class, args); 
     }
 
@@ -87,6 +86,12 @@ public class MainResource {
         @ConfigProperty(name = "categories")
         String categories;
     
+        @ConfigProperty(name = "namespace.suffix")
+        String namespaceSuffix;
+    
+        @ConfigProperty(name = "output.delimiter")
+        String outputDelimiter;
+    
         @Override
         public int run(String... args) throws Exception {
             String dir = workingDirectory;
@@ -102,13 +107,6 @@ public class MainResource {
             debug(targetDateTimeWithTimeZone.toString());
             debug(sourceTimeWithTimeZone.toString());
             debug(sourceTimeWithTimeZone.getYear() + "-" + sourceTimeWithTimeZone.getMonthValue() + "-" + sourceTimeWithTimeZone.getDayOfMonth() + " " + sourceTimeWithTimeZone.getHour() + ":" + sourceTimeWithTimeZone.getMinute());
-
-            String[] categoriesArray = categories.split(",");
-            Set<String> categoriesSet = new HashSet<>();
-            for (String category : categoriesArray) {
-                categoriesSet.add(category.strip());
-            }
-            debug(categoriesSet.contains("usage_cpu") ? "yes" : "no");
 
             downloadFromS3();
 
@@ -214,16 +212,17 @@ public class MainResource {
                     }
 
                     // Save the metrics data to file
-                    for (Entry<String, Map<String, Double>> entrySet : metricsByNamespace.entrySet()) {
-                        String outputFileName = categoryName + "_" + entrySet.getKey() + ".txt";
-                        try (BufferedWriter writer = new BufferedWriter(new FileWriter(new File(workingDirectory, outputFileName)))) {
+                    String outputFileName = categoryName + ".txt";
+                    try (BufferedWriter writer = new BufferedWriter(new FileWriter(new File(workingDirectory, outputFileName)))) {
+                        for (Entry<String, Map<String, Double>> entrySet : metricsByNamespace.entrySet()) {
+                            String namespace = entrySet.getKey();
                             for (Entry<String, Double> metricsByDate : entrySet.getValue().entrySet()) {
-                                writer.write(metricsByDate.getKey() + "\t" + metricsByDate.getValue());
+                                writer.write(namespace + outputDelimiter + metricsByDate.getKey() + outputDelimiter + metricsByDate.getValue());
                                 writer.newLine();
                             }
-                        } catch (IOException ex) {
-                            throw new RuntimeException(ex);
                         }
+                    } catch (IOException ex) {
+                        throw new RuntimeException(ex);
                     }
                 } else {
                     debug("Skipping category:" + categoryPrefixKey + "\n---------------------\n");
@@ -300,12 +299,14 @@ public class MainResource {
                                 }
                             }
 
-                            // Only store the data if it's within our desired date range
+                            // Only store the data if it's within our desired date range and the namespace suffix matches our namespace suffix
                             int currentYear = targetTimestamp.getYear();
                             int currentMonth = targetTimestamp.getMonthValue();
 
-                            if ((currentYear*12 + currentMonth) >=
-                                (targetStartingYear*12 + targetStartingMonth)) {
+                            if (
+                                ((currentYear*12 + currentMonth) >= (targetStartingYear*12 + targetStartingMonth)) &&
+                                namespace.endsWith(namespaceSuffix)
+                               ) {
                                 // Store the data in the Map
                                 Map<String, Double> metricsByDate = metricsByNamespace.get(namespace);
                                 if (metricsByDate == null) {
